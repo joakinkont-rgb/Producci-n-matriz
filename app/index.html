@@ -263,6 +263,7 @@ details.lotes .lt{font-size:12px; color:var(--ink-2); padding:3px 0 0}
     <button class="navbtn" data-view="ajustes">Mermas y ajustes</button>
     <div class="navgroup">Inventario</div>
     <button class="navbtn" data-view="conteo">Conteo y pedido</button>
+    <button class="navbtn" data-view="compras">Compras <span class="cnt" id="cnt-com"></span></button>
     <button class="navbtn" data-view="existencias">Existencias <span class="cnt" id="cnt-ex"></span></button>
     <button class="navbtn" data-view="movimientos">Movimientos <span class="cnt" id="cnt-mov"></span></button>
     <div class="navgroup">Catálogo</div>
@@ -514,6 +515,13 @@ function render(){
   $("#cnt-mov").textContent = state.movimientos.length || "";
   $("#cnt-ord").textContent = state.ordenes.length || "";
   $("#cnt-ex").textContent  = "";
+  const porComprar = state.articulos.filter(a=>{
+    if(a.activo===false) return false;
+    if(a.okFecha && -(diasA(a.okFecha)||0) <= DIAS_PALOMITA) return false;
+    if(!state.movimientos.some(m=>m.articuloId===a.id)) return false;
+    return (Number(a.stockMin)||0) - saldoDe(a.id, a.almacen) > 0;
+  }).length;
+  $("#cnt-com").textContent = porComprar || "";
   (VIEWS[view] || VIEWS.tablero)(c, A);
   if(state.movimientos.length > 3000){
     c.prepend(el("div",{class:"banner"}, el("div",{},
@@ -525,7 +533,7 @@ function render(){
 const TITULOS = {
   tablero:"Tablero", recepcion:"Recepción de insumos", produccion:"Órdenes de producción",
   despacho:"Despachos a sucursal", ajustes:"Mermas y ajustes", existencias:"Existencias",
-  movimientos:"Movimientos", conteo:"Conteo físico y pedido", articulos:"Catálogo de artículos", recetas:"Recetas y fichas técnicas",
+  movimientos:"Movimientos", conteo:"Conteo físico y pedido", compras:"Lista de compras", articulos:"Catálogo de artículos", recetas:"Recetas y fichas técnicas",
   almacenes:"Almacenes"
 };
 
@@ -1704,18 +1712,28 @@ function vConteo(c){
     const palomas = filas.filter(x=>x.cont===OK).length;
     const cambios = filas.filter(x=> x.cont!==null && x.cont!==OK && Math.abs(x.cont - x.sis) > 0.0001);
     if(!capturados) return toast("Captura al menos un conteo antes de aplicar.", true);
-    if(!cambios.length) return toast("Nada que ajustar. Los conteos con número coinciden con el sistema.");
+    const palNuevas = filas.filter(x=>x.cont===OK && !x.a.okFecha).length;
+    if(!cambios.length && !palomas) return toast("Nada que ajustar. Los conteos coinciden con el sistema.");
     if(!confirm("Aplicar el conteo de "+alm(conteo.almacen).nombre+"?\n\n"+
-      cambios.length+" artículo(s) quedarán ajustados a lo que contaste.\n"+
-      (palomas? palomas+" con palomita se quedan como están, porque no traen cantidad.\n":"")+
-      "\nSe registra un movimiento de ajuste por cada diferencia.")) return;
+      (cambios.length? cambios.length+" artículo(s) quedarán ajustados a lo que contaste.\n":"")+
+      (palomas? palomas+" con palomita se marcan como revisados, sin tocar su existencia.\n":"")+
+      "\nSe registra un movimiento de ajuste por cada diferencia de cantidad.")) return;
     for(const x of cambios){
       await put("movimientos", uid("mov-"), {ts:new Date().toISOString(), fecha:conteo.fecha||hoy(),
         tipo:"ajuste", articuloId:x.a.id, almacen:conteo.almacen, cantidad:(x.cont - x.sis), lote:null,
         motivo:"Conteo físico", responsable:conteo.responsable||null,
         nota:"Contado "+qty(x.cont)+" "+x.a.unidad+", sistema "+qty(x.sis)});
     }
-    toast("Conteo aplicado. "+cambios.length+" ajuste(s) registrados"+(palomas? ", "+palomas+" con palomita sin tocar":"")+".");
+    /* la palomita se guarda con fecha para que Compras sepa que ya se revisó;
+       un conteo con número la deja sin efecto */
+    for(const x of filas){
+      if(x.cont===null) continue;
+      const nueva = x.cont===OK ? (conteo.fecha||hoy()) : null;
+      if((x.a.okFecha||null) === nueva) continue;
+      const copia = Object.assign({}, x.a); delete copia.id; copia.okFecha = nueva;
+      await put("articulos", x.a.id, copia);
+    }
+    toast("Conteo aplicado. "+cambios.length+" ajuste(s)"+(palomas? " y "+palomas+" palomita(s) marcadas":"")+".");
     conteo.valores = {}; conteo.aviso = null;
   }
 
@@ -1761,8 +1779,177 @@ function vConteo(c){
   pinta(); pintaAviso();
 }
 
+/* ---------- Compras ----------
+   Qué hay que comprar hoy, con COM = MIN - INV sobre la existencia actual.
+   Quedan fuera los que traen palomita vigente y los que están al mínimo.  */
+const compras = {almacen:""};
+const DIAS_PALOMITA = 15;   // después de esto la palomita se considera vieja
+
+function palomita(a){
+  if(!a.okFecha) return null;
+  const d = diasA(a.okFecha);
+  return {fecha:a.okFecha, dias: d===null?0:-d};
+}
+function nuncaContado(a){
+  if(a.okFecha) return false;
+  return !state.movimientos.some(m=>m.articuloId===a.id);
+}
+
+function vCompras(c){
+  const alms = almacenes();
+  const filas = [];
+  for(const a of state.articulos){
+    if(a.activo===false) continue;
+    const hay = saldoDe(a.id, a.almacen);
+    const min = Number(a.stockMin)||0;
+    const com = min - hay;
+    const pal = palomita(a);
+    let grupo;
+    if(pal && pal.dias <= DIAS_PALOMITA) grupo = "palomita";
+    else if(nuncaContado(a)) grupo = "sincontar";
+    else if(com > 0) grupo = "comprar";
+    else grupo = "suficiente";
+    filas.push({a, hay, min, com, pal, grupo, alm:alm(a.almacen)});
+  }
+  const visibles = f => !compras.almacen || f.a.almacen===compras.almacen;
+  const orden = f => (f.alm.orden||99)*1000;
+  const comprar = filas.filter(f=>f.grupo==="comprar" && visibles(f))
+    .sort((x,y)=> orden(x)-orden(y) || String(x.a.nombre).localeCompare(String(y.a.nombre)));
+  const pals   = filas.filter(f=>f.grupo==="palomita" && visibles(f));
+  const sufi   = filas.filter(f=>f.grupo==="suficiente" && visibles(f));
+  const sinc   = filas.filter(f=>f.grupo==="sincontar" && visibles(f));
+
+  const ultimo = state.movimientos.filter(m=>m.tipo==="ajuste")
+    .map(m=>String(m.fecha).slice(0,10)).sort().pop();
+
+  const chips = el("div",{class:"chipbar"},
+    el("button",{class:"chip", "aria-pressed":String(compras.almacen===""),
+      onclick:()=>{compras.almacen=""; render();}, text:"Todas las secciones"}),
+    alms.map(a=>{
+      const n = filas.filter(f=>f.a.almacen===a.id && f.grupo==="comprar").length;
+      return el("button",{class:"chip", "aria-pressed":String(compras.almacen===a.id),
+        onclick:()=>{compras.almacen=a.id; render();}, text:a.nombre+(n?" · "+n:"")});
+    }));
+
+  /* ---- texto plano, para mandar por mensaje ---- */
+  function listaTexto(){
+    const out=[];
+    let secActual=null;
+    comprar.forEach(f=>{
+      if(f.alm.nombre!==secActual){ secActual=f.alm.nombre; out.push(""); out.push(secActual.toUpperCase()); }
+      out.push("  "+qty(f.com)+" "+f.a.unidad+"   "+f.a.nombre);
+    });
+    return "PEDIDO MATRIZ · "+fecha(ultimo||hoy())+"\n"+
+      comprar.length+" artículo(s)\n"+out.join("\n");
+  }
+  async function copiar(){
+    if(!comprar.length) return toast("No hay nada por comprar con el conteo actual.");
+    try{ await navigator.clipboard.writeText(listaTexto());
+      toast("Lista copiada. Pégala en el chat del proveedor."); }
+    catch(e){ toast("Este visor no deja copiar. Usa exportar.", true); }
+  }
+  async function exportar(){
+    if(!comprar.length) return toast("No hay nada por comprar con el conteo actual.");
+    const esc = v => '"'+String(v===null||v===undefined?"":v).replace(/"/g,'""')+'"';
+    const lines = [["SECCION","ARTICULO","MIN","INV","COM","U"].join(",")];
+    comprar.forEach(f=> lines.push([f.alm.nombre, f.a.nombre, f.min, f.hay, f.com, f.a.unidad].map(esc).join(",")));
+    const csv = "﻿"+lines.join("\n");
+    let d=null;
+    try{ if(window.claude && claude.use) d = await claude.use("downloads"); }catch(e){ d=null; }
+    if(d){ try{ await d.save({filename:"pedido-matriz-"+(ultimo||hoy())+".csv", data:csv});
+      return toast("Pedido listo para guardar."); }catch(e){} }
+    try{ await navigator.clipboard.writeText(csv); toast("Pedido copiado como CSV."); }
+    catch(e){ toast("No se pudo exportar desde este visor.", true); }
+  }
+
+  c.appendChild(el("section",{},
+    el("div",{class:"section-h"}, el("h2",{text:"Lo que hay que comprar"}),
+      el("span",{class:"hint", text: ultimo? "Según el último conteo aplicado, "+fecha(ultimo) : "Todavía no se aplica ningún conteo"})),
+    el("div",{class:"kpis"},
+      el("div",{class:"kpi"}, el("div",{class:"k",text:"Artículos por comprar"}),
+        el("div",{class:"v",text:String(comprar.length)}),
+        el("div",{class:"s",text: compras.almacen? alm(compras.almacen).nombre : "todas las secciones"})),
+      el("div",{class:"kpi"}, el("div",{class:"k",text:"No se piden"}),
+        el("div",{class:"v",text:String(pals.length+sufi.length)}),
+        el("div",{class:"s",text:pals.length+" con palomita, "+sufi.length+" al mínimo"})),
+      el("div",{class:"kpi"}, el("div",{class:"k",text:"Sin contar nunca"}),
+        el("div",{class:"v",text:String(sinc.length)}),
+        el("div",{class:"s",text:"no se sabe si hace falta"}))),
+    el("div",{class:"filters", style:"margin-top:12px"}, chips),
+    el("div",{class:"formrow", style:"margin-bottom:12px"},
+      el("button",{class:"btn primary", onclick:copiar, text:"Copiar lista para mandar"}),
+      el("button",{class:"btn", onclick:exportar, text:"Exportar CSV"}),
+      el("span",{class:"small muted", text:"La lista sale agrupada por sección, lista para pegar en un mensaje."}))));
+
+  /* ---- tabla principal ---- */
+  const tb = el("tbody",{});
+  if(!comprar.length){
+    tb.appendChild(el("tr",{}, el("td",{colspan:"6"}, el("div",{class:"empty",
+      text: ultimo? "Nada por comprar con el conteo actual." :
+        "Aplica un conteo en la pantalla de Conteo y pedido para que salga la lista."}))));
+  }
+  let sec=null;
+  comprar.forEach(f=>{
+    if(f.alm.nombre!==sec){
+      sec=f.alm.nombre;
+      tb.appendChild(el("tr",{}, el("td",{colspan:"6", style:"background:var(--surface-2);padding:7px 10px"},
+        el("span",{class:"tag"}, el("span",{class:"zdot", style:"background:var(--z-"+(f.alm.zona||"")+")"}), sec))));
+    }
+    tb.appendChild(el("tr",{},
+      el("td",{}, el("div",{style:"font-weight:500", text:f.a.nombre}),
+        f.a.nota? el("div",{class:"small muted", text:f.a.nota}):null),
+      el("td",{class:"mono small muted", text:f.a.unidad}),
+      el("td",{class:"num mono muted", text:qty(f.min)}),
+      el("td",{class:"num mono", style: f.hay<=0?"color:var(--crit);font-weight:600":"", text:qty(f.hay)}),
+      el("td",{class:"num mono", style:"font-weight:700;color:var(--accent);font-size:15px",
+        text:qty(f.com)+" "+f.a.unidad}),
+      el("td",{}, f.hay<=0 ? el("span",{class:"tag crit", text:"Agotado"})
+        : el("span",{class:"tag warn", text:"Bajo mínimo"}))));
+  });
+  c.appendChild(el("section",{},
+    el("div",{class:"panel tablewrap"}, el("table",{},
+      el("thead",{}, el("tr",{},
+        el("th",{text:"Artículo"}), el("th",{text:"U"}), el("th",{class:"num",text:"MIN"}),
+        el("th",{class:"num",text:"Hay"}), el("th",{class:"num",text:"COMPRAR"}), el("th",{}))), tb))));
+
+  /* ---- por qué quedaron fuera los demás ---- */
+  function bloque(titulo, hint, rows, render){
+    if(!rows.length) return null;
+    return el("details",{class:"panel", style:"padding:0"},
+      el("summary",{style:"cursor:pointer;padding:11px 14px;font-weight:600"},
+        titulo+" ("+rows.length+")",
+        el("span",{class:"small muted", style:"font-weight:400", text:" · "+hint})),
+      el("div",{class:"tablewrap"}, el("table",{}, el("tbody",{}, rows.map(render)))));
+  }
+  const fuera = el("div",{class:"stack"},
+    bloque("Con palomita, no se piden", "alguien revisó y había suficiente", pals, f=>{
+      const vieja = f.pal.dias > DIAS_PALOMITA - 5;
+      return el("tr",{},
+        el("td",{text:f.a.nombre}),
+        el("td",{class:"small muted", text:f.alm.nombre}),
+        el("td",{class:"right"}, el("span",{class:"tag "+(vieja?"warn":"ok"),
+          text:"Revisado "+fecha(f.pal.fecha)+(vieja? ", ya tiene "+f.pal.dias+" días":"")})));
+    }),
+    bloque("Al mínimo o con sobrante", "hay lo suficiente según el conteo", sufi, f=>
+      el("tr",{},
+        el("td",{text:f.a.nombre}),
+        el("td",{class:"small muted", text:f.alm.nombre}),
+        el("td",{class:"num mono small", text:"hay "+qty(f.hay)+" "+f.a.unidad}),
+        el("td",{class:"right"}, f.com<0? el("span",{class:"tag", text:"sobran "+qty(-f.com)})
+          : el("span",{class:"tag ok", text:"al mínimo"})))),
+    bloque("Sin contar nunca", "no hay dato, conviene levantar su conteo", sinc, f=>
+      el("tr",{},
+        el("td",{text:f.a.nombre}),
+        el("td",{class:"small muted", text:f.alm.nombre}),
+        el("td",{class:"num mono small muted", text:"MIN "+qty(f.min)+" "+f.a.unidad}),
+        el("td",{class:"right"}, el("span",{class:"tag warn", text:"Falta contar"}))))
+  );
+  if(fuera.children.length) c.appendChild(el("section",{},
+    el("div",{class:"section-h"}, el("h2",{text:"Por qué no entraron los demás"})), fuera));
+}
+
 const VIEWS = {tablero:vTablero, recepcion:vRecepcion, produccion:vProduccion, despacho:vDespacho,
-  ajustes:vAjustes, existencias:vExistencias, conteo:vConteo, movimientos:vMovimientos, articulos:vArticulos,
+  ajustes:vAjustes, existencias:vExistencias, conteo:vConteo, compras:vCompras, movimientos:vMovimientos, articulos:vArticulos,
   recetas:vRecetas, almacenes:vAlmacenes};
 
 function go(v){ view=v; try{ location.hash=v; }catch(e){} render(); window.scrollTo({top:0}); }

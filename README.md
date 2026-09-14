@@ -32,7 +32,7 @@ Colecciones de la base del Artifact:
 
 - `almacenes` — zonas de guarda con su rango de temperatura.
 - `articulos` — insumos y productos terminados, con unidad de compra,
-  almacén habitual y stock mínimo.
+  almacén habitual, stock mínimo y la fecha de la última palomita.
 - `recetas` — fichas técnicas: qué insumos y cuánto rinde cada tanda.
 - `movimientos` — la bitácora. Cada renglón lleva signo: entra positivo,
   sale negativo.
@@ -61,6 +61,22 @@ Positivo es lo que hay que comprar, negativo es lo que sobra.
 En FINAL se acepta un número o una palomita. La palomita significa que hay
 suficiente y no hay que pedir, pero no compromete una cantidad, así que no
 mueve la existencia. Solo los renglones con número generan ajuste.
+
+Al aplicar el conteo, la palomita se guarda en el artículo con su fecha
+(`okFecha`). Así la lista de compras sabe que ese artículo ya se revisó y no
+lo pide, aunque su existencia figure en cero. Un conteo posterior con número
+la deja sin efecto.
+
+### Lista de compras
+
+La pantalla de Compras junta todas las secciones y deja una sola lista con
+lo que falta, agrupada por sección y lista para copiar a un mensaje. Abajo
+explica por qué quedó fuera cada artículo que no entró:
+
+- **Con palomita**: alguien revisó y había suficiente. Se avisa cuando la
+  revisión ya tiene más de 15 días.
+- **Al mínimo o con sobrante**: el conteo alcanza.
+- **Sin contar nunca**: no hay dato, así que no se puede saber si falta.
 
 ### Leer la foto de la hoja
 
