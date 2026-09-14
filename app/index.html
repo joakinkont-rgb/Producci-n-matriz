@@ -1498,10 +1498,12 @@ function vConteo(c){
   const tb = el("tbody",{}), kpiBox = el("div",{class:"kpis"});
 
   const contadoDe = a => { const v=conteo.valores[a.id]; return (v===undefined||v==="")? null : num(v); };
+  /* Tu fórmula tal cual: COM = MIN - INV. Positivo es lo que hay que comprar,
+     negativo es lo que sobra por encima del mínimo. */
   function pedidoDe(a){
     const cont = contadoDe(a);
     const base = cont===null ? saldoDe(a.id, conteo.almacen) : cont;
-    return Math.max(0, (Number(a.stockMin)||0) - base);
+    return (Number(a.stockMin)||0) - base;
   }
   function refrescaKpis(){
     const contados = arts.filter(a=>contadoDe(a)!==null).length;
@@ -1514,7 +1516,7 @@ function vConteo(c){
       el("div",{class:"v",text:contados+" / "+arts.length}),
       el("div",{class:"meter"}, el("i",{class:(pct>=100?"ok":pct>0?"warn":""), style:"width:"+pct+"%"}))));
     kpiBox.appendChild(el("div",{class:"kpi"}, el("div",{class:"k",text:"Líneas por pedir"}),
-      el("div",{class:"v",text:String(pedir)}), el("div",{class:"s",text:"mínimo menos lo contado"})));
+      el("div",{class:"v",text:String(pedir)}), el("div",{class:"s",text:"COM = MIN menos INV"})));
   }
 
   function pinta(){
@@ -1532,8 +1534,16 @@ function vConteo(c){
         style:"width:96px;text-align:right;padding:5px 7px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface);font-family:'IBM Plex Mono',monospace"});
       function refrescaFila(){
         const p = pedidoDe(a);
-        celdaPed.textContent = p>0 ? qty(p)+" "+a.unidad : "—";
-        celdaPed.style.cssText = p>0 ? "text-align:right;font-weight:600;color:var(--accent)" : "text-align:right;color:var(--ink-3)";
+        if(p>0){
+          celdaPed.textContent = qty(p)+" "+a.unidad;
+          celdaPed.style.cssText = "text-align:right;font-weight:600;color:var(--accent)";
+        }else if(p<0){
+          celdaPed.textContent = "sobran "+qty(-p);
+          celdaPed.style.cssText = "text-align:right;color:var(--ink-3);font-size:12px";
+        }else{
+          celdaPed.textContent = "al mínimo";
+          celdaPed.style.cssText = "text-align:right;color:var(--ok);font-size:12px";
+        }
         const cont = contadoDe(a);
         if(cont===null){ celdaDif.textContent="—"; celdaDif.style.color="var(--ink-3)"; }
         else{
