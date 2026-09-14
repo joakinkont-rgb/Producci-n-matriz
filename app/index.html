@@ -1245,7 +1245,8 @@ function vArticulos(c){
     const data={codigo:iCod.value.trim()||null, nombre:iNom.value.trim(), tipo:sTipo.value,
       categoria:iCat.value.trim()||null, unidad:sUni.value, almacen:sAlm.value,
       stockMin: iMin.value? num(iMin.value): null, vidaUtilDias: iVida.value? num(iVida.value): null,
-      costoRef: iCosto.value? num(iCosto.value): null, activo:true};
+      costoRef: iCosto.value? num(iCosto.value): null,
+      activo: form.id ? (art(form.id)||{}).activo !== false : true};
     await put("articulos", form.id || uid("art-"), data);
     toast(form.id? "Artículo actualizado." : "Artículo agregado al catálogo.");
     limpiar();
@@ -1279,14 +1280,27 @@ function vArticulos(c){
     const total=saldoDe(a.id);
     tb.appendChild(el("tr",{},
       el("td",{class:"mono small", text:a.codigo||"—"}),
-      el("td",{}, el("div",{style:"font-weight:500", text:a.nombre}),
-        el("div",{class:"small muted", text:(a.categoria||"Sin categoría")})),
+      el("td",{style: a.activo===false?"opacity:.55":""},
+        el("div",{style:"font-weight:500", text:a.nombre}),
+        el("div",{class:"small muted", text:(a.categoria||"Sin categoría")}),
+        a.activo===false? el("span",{class:"tag warn", text:"Dado de baja"}):null,
+        a.nota? el("div",{class:"small muted", text:a.nota}):null),
       el("td",{}, el("span",{class:"tag", text: a.tipo==="terminado"?"Terminado":"Insumo"})),
       el("td",{}, el("span",{class:"tag"}, el("span",{class:"zdot", style:"background:var(--z-"+(alm(a.almacen).zona||"")+")"}), alm(a.almacen).nombre)),
       el("td",{class:"num mono", text:qty(total)+" "+a.unidad}),
       el("td",{class:"num mono", text:a.stockMin? qty(a.stockMin):"—"}),
       el("td",{class:"num mono", text:a.vidaUtilDias? a.vidaUtilDias+" d":"—"}),
       el("td",{class:"right"},
+        el("button",{class:"btn ghost sm", text: a.activo===false?"Reactivar":"Dar de baja",
+          title: a.activo===false? "Vuelve a aparecer en el conteo" : "Deja de aparecer en el conteo, sin borrar su historial",
+          onclick:async()=>{
+            const alta = a.activo===false;
+            const copia = Object.assign({}, a); delete copia.id;
+            copia.activo = alta;
+            if(alta) copia.nota = null;
+            await put("articulos", a.id, copia);
+            toast(alta? a.nombre+" vuelve al conteo." : a.nombre+" ya no aparece en el conteo.");
+          }}),
         el("button",{class:"btn ghost sm", text:"Editar", onclick:()=>editar(a)}),
         el("button",{class:"btn ghost sm danger", text:"Borrar", onclick:async()=>{
           const n=state.movimientos.filter(m=>m.articuloId===a.id).length;
@@ -1471,9 +1485,12 @@ function vAlmacenes(c){
 }
 
 /* ---------- Conteo físico y pedido ----------
-   Replica la hoja INV_MATRIZ: por sección se captura el conteo (INV)
-   y el sistema calcula el pedido (MIN - INV), igual que tu fórmula.   */
-const conteo = {almacen:"", fecha:hoy(), responsable:"", valores:{}};
+   Replica la hoja impresa: columnas MIN | FINAL | U.
+   En FINAL se acepta un número o una palomita, que significa
+   "hay suficiente, no pedir" sin comprometer una cantidad.
+   La foto de la hoja se puede leer para llenar la captura.        */
+const conteo = {almacen:"", fecha:hoy(), responsable:"", valores:{}, leyendo:false, aviso:null};
+const OK = "OK";  // la palomita
 
 function vConteo(c){
   const alms = almacenes();
@@ -1483,12 +1500,12 @@ function vConteo(c){
     alms.map(a=>{
       const n = state.articulos.filter(x=>x.almacen===a.id && x.activo!==false).length;
       return el("button",{class:"chip", "aria-pressed":String(conteo.almacen===a.id),
-        onclick:()=>{ conteo.almacen=a.id; render(); }, text:a.nombre+" ("+n+")"});
+        onclick:()=>{ conteo.almacen=a.id; conteo.aviso=null; render(); }, text:a.nombre+" ("+n+")"});
     }));
 
-  const iFecha=el("input",{type:"date", value:conteo.fecha});
+  const iFecha=el("input",{type:"date", id:"conteo-fecha", value:conteo.fecha});
   iFecha.addEventListener("change",()=>{ conteo.fecha=iFecha.value; });
-  const iResp=el("input",{type:"text", value:conteo.responsable, placeholder:"Quién cuenta"});
+  const iResp=el("input",{type:"text", id:"conteo-resp", value:conteo.responsable, placeholder:"Quién cuenta"});
   iResp.addEventListener("input",()=>{ conteo.responsable=iResp.value; });
 
   const arts = state.articulos
@@ -1497,24 +1514,32 @@ function vConteo(c){
 
   const tb = el("tbody",{}), kpiBox = el("div",{class:"kpis"});
 
-  const contadoDe = a => { const v=conteo.valores[a.id]; return (v===undefined||v==="")? null : num(v); };
-  /* Tu fórmula tal cual: COM = MIN - INV. Positivo es lo que hay que comprar,
-     negativo es lo que sobra por encima del mínimo. */
+  const contadoDe = a => {
+    const v = conteo.valores[a.id];
+    if(v===undefined || v==="") return null;
+    if(v===OK) return OK;
+    return num(v);
+  };
+  /* Tu fórmula: COM = MIN - INV. Con palomita no se pide nada. */
   function pedidoDe(a){
     const cont = contadoDe(a);
+    if(cont===OK) return 0;
     const base = cont===null ? saldoDe(a.id, conteo.almacen) : cont;
     return (Number(a.stockMin)||0) - base;
   }
   function refrescaKpis(){
     const contados = arts.filter(a=>contadoDe(a)!==null).length;
+    const palomas = arts.filter(a=>contadoDe(a)===OK).length;
     const pedir = arts.filter(a=>pedidoDe(a)>0).length;
     const pct = arts.length ? contados/arts.length*100 : 0;
     kpiBox.innerHTML="";
     kpiBox.appendChild(el("div",{class:"kpi"}, el("div",{class:"k",text:"Artículos de la sección"}),
       el("div",{class:"v",text:String(arts.length)})));
-    kpiBox.appendChild(el("div",{class:"kpi"}, el("div",{class:"k",text:"Ya contados"}),
+    kpiBox.appendChild(el("div",{class:"kpi"}, el("div",{class:"k",text:"Ya capturados"}),
       el("div",{class:"v",text:contados+" / "+arts.length}),
       el("div",{class:"meter"}, el("i",{class:(pct>=100?"ok":pct>0?"warn":""), style:"width:"+pct+"%"}))));
+    kpiBox.appendChild(el("div",{class:"kpi"}, el("div",{class:"k",text:"Con palomita"}),
+      el("div",{class:"v",text:String(palomas)}), el("div",{class:"s",text:"hay, sin cantidad"})));
     kpiBox.appendChild(el("div",{class:"kpi"}, el("div",{class:"k",text:"Líneas por pedir"}),
       el("div",{class:"v",text:String(pedir)}), el("div",{class:"s",text:"COM = MIN menos INV"})));
   }
@@ -1529,12 +1554,20 @@ function vConteo(c){
       const sis = saldoDe(a.id, conteo.almacen);
       const celdaPed = el("td",{class:"num mono"});
       const celdaDif = el("td",{class:"num mono"});
+      const v = conteo.valores[a.id];
       const inp = el("input",{type:"number", step:"0.001", min:"0", placeholder:"—",
-        value: conteo.valores[a.id]===undefined ? "" : conteo.valores[a.id],
-        style:"width:96px;text-align:right;padding:5px 7px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface);font-family:'IBM Plex Mono',monospace"});
+        id:"cnt-"+a.id, value: (v===undefined||v===OK) ? "" : v,
+        style:"width:88px;text-align:right;padding:5px 7px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface);font-family:'IBM Plex Mono',monospace"});
+      const btnOK = el("button",{class:"btn sm", "aria-pressed":String(v===OK), title:"Hay suficiente, no pedir",
+        style:"padding:5px 9px;"+(v===OK?"background:var(--ok-soft);border-color:var(--ok);color:var(--ok);font-weight:700":""),
+        text:"✓"});
       function refrescaFila(){
+        const cont = contadoDe(a);
         const p = pedidoDe(a);
-        if(p>0){
+        if(cont===OK){
+          celdaPed.textContent = "no pedir";
+          celdaPed.style.cssText = "text-align:right;color:var(--ok);font-size:12px";
+        }else if(p>0){
           celdaPed.textContent = qty(p)+" "+a.unidad;
           celdaPed.style.cssText = "text-align:right;font-weight:600;color:var(--accent)";
         }else if(p<0){
@@ -1544,55 +1577,155 @@ function vConteo(c){
           celdaPed.textContent = "al mínimo";
           celdaPed.style.cssText = "text-align:right;color:var(--ok);font-size:12px";
         }
-        const cont = contadoDe(a);
-        if(cont===null){ celdaDif.textContent="—"; celdaDif.style.color="var(--ink-3)"; }
-        else{
+        if(cont===null || cont===OK){
+          celdaDif.textContent = cont===OK ? "sin cantidad" : "—";
+          celdaDif.style.cssText = "text-align:right;color:var(--ink-3);font-size:12px";
+        }else{
           const d = cont - sis;
           celdaDif.textContent = (d>0?"+":"")+qty(d);
-          celdaDif.style.color = Math.abs(d)<0.0001 ? "var(--ok)" : d<0 ? "var(--crit)" : "var(--warn)";
-          celdaDif.style.fontWeight = Math.abs(d)<0.0001 ? "400" : "600";
+          celdaDif.style.cssText = "text-align:right;font-weight:"+(Math.abs(d)<0.0001?"400":"600")+
+            ";color:"+(Math.abs(d)<0.0001?"var(--ok)":d<0?"var(--crit)":"var(--warn)");
         }
         refrescaKpis();
       }
-      inp.addEventListener("input", ()=>{ conteo.valores[a.id]=inp.value; refrescaFila(); });
+      inp.addEventListener("input", ()=>{
+        conteo.valores[a.id]=inp.value;
+        btnOK.setAttribute("aria-pressed","false"); btnOK.style.cssText="padding:5px 9px;";
+        refrescaFila();
+      });
+      btnOK.addEventListener("click", ()=>{
+        if(conteo.valores[a.id]===OK){ delete conteo.valores[a.id]; }
+        else { conteo.valores[a.id]=OK; inp.value=""; }
+        const on = conteo.valores[a.id]===OK;
+        btnOK.setAttribute("aria-pressed",String(on));
+        btnOK.style.cssText = "padding:5px 9px;"+(on?"background:var(--ok-soft);border-color:var(--ok);color:var(--ok);font-weight:700":"");
+        refrescaFila();
+      });
       tb.appendChild(el("tr",{},
         el("td",{}, el("div",{style:"font-weight:500", text:a.nombre}),
           a.nota? el("div",{class:"small muted", text:a.nota}):null),
         el("td",{class:"mono small muted", text:a.unidad}),
         el("td",{class:"num mono", text: a.stockMin!==null&&a.stockMin!==undefined ? qty(a.stockMin) : "—"}),
         el("td",{class:"num mono muted", text:qty(sis)}),
-        el("td",{class:"num"}, inp),
+        el("td",{class:"num", style:"white-space:nowrap"}, inp, " ", btnOK),
         celdaDif, celdaPed));
       refrescaFila();
     });
     refrescaKpis();
   }
 
+  /* ----- leer la foto de la hoja ----- */
+  const avisoBox = el("div",{});
+  function pintaAviso(){
+    avisoBox.innerHTML="";
+    if(conteo.aviso) avisoBox.appendChild(el("div",{class:"banner "+(conteo.aviso.tipo||"info")},
+      el("div",{}, el("strong",{text:conteo.aviso.titulo+" "}), conteo.aviso.texto),
+      el("div",{class:"spacer"}),
+      el("button",{class:"btn ghost sm", text:"✕", "aria-label":"Cerrar aviso",
+        onclick:()=>{ conteo.aviso=null; pintaAviso(); }})));
+  }
+
+  const fileInput = el("input",{type:"file", id:"conteo-foto", accept:"image/*", multiple:true, hidden:true});
+  const btnFoto = el("button",{class:"btn", text:"Leer foto de la hoja", hidden:true,
+    onclick:()=>fileInput.click()});
+
+  (async ()=>{
+    let sample=null;
+    try{ sample = await claude.use("sample"); }catch(e){ sample=null; }
+    if(!sample) return;
+    const lim = await sample.limits().catch(()=>null);
+    if(!lim || !lim.images) return;
+    fileInput.accept = lim.images.mediaTypes.join(",");
+    btnFoto.hidden = false;
+
+    fileInput.addEventListener("change", async ()=>{
+      const files = Array.from(fileInput.files||[]).slice(0, lim.images.maxCount);
+      fileInput.value = "";
+      if(!files.length) return;
+      conteo.leyendo = true;
+      btnFoto.disabled = true; btnFoto.textContent = "Leyendo la hoja…";
+      conteo.aviso = {tipo:"info", titulo:"Leyendo la hoja.", texto:"Puede tardar hasta un minuto."};
+      pintaAviso();
+      const lista = arts.map(a=>a.nombre).join("\n");
+      const prompt =
+        "Estas son fotos de una hoja de conteo de inventario de una cocina, llenada a mano.\n"+
+        "La tabla tiene las columnas: ARTICULO, MIN, FINAL, U.\n"+
+        "Me interesa solo la columna FINAL, que es el conteo físico escrito a mano.\n\n"+
+        "Reglas de lectura:\n"+
+        "- Si en FINAL hay un número, devuélvelo como número.\n"+
+        "- Si en FINAL hay una palomita o tache de verificación, devuelve el texto \"OK\".\n"+
+        "- Si la celda FINAL está vacía, no incluyas ese renglón.\n"+
+        "- Si junto al número hay una unidad escrita a mano (por ejemplo \"1 caja\"), "+
+        "devuelve el número y pon la unidad en el campo nota.\n\n"+
+        "Estos son los artículos de esta sección, usa exactamente estos nombres:\n"+lista+"\n\n"+
+        "Responde solo con un arreglo JSON de objetos {\"nombre\":\"...\",\"final\":<número o \"OK\">,\"nota\":\"...\"}. "+
+        "El campo nota es opcional. Ejemplo: [{\"nombre\":\"ARROZ\",\"final\":30}]";
+      try{
+        const filas = await sample.json(prompt, {images:files, modelTier:"complex", cache:false});
+        if(!Array.isArray(filas)) throw {code:"formato", message:"respuesta inesperada"};
+        const norm = s => String(s||"").toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^A-Z0-9]/g,"");
+        const idx = new Map(); arts.forEach(a=> idx.set(norm(a.nombre), a));
+        let ok=0; const nuevas=[], sinMatch=[];
+        for(const f of filas){
+          const k = norm(f.nombre);
+          let a = idx.get(k);
+          if(!a) a = arts.find(x=>{ const n=norm(x.nombre); return n.startsWith(k) || k.startsWith(n); });
+          if(!a){ sinMatch.push(f.nombre); continue; }
+          const val = (String(f.final).toUpperCase()==="OK") ? OK : String(num(f.final));
+          conteo.valores[a.id] = val;
+          ok++;
+          if(f.nota) nuevas.push(a.nombre+": "+f.nota);
+        }
+        conteo.aviso = {tipo: sinMatch.length? "warn":"info",
+          titulo: "Se leyeron "+ok+" renglones.",
+          texto: "Revisa las cantidades contra la foto antes de aplicar."+
+            (sinMatch.length? " No se reconocieron: "+sinMatch.join(", ")+"." : "")+
+            (nuevas.length? " Con unidad escrita a mano: "+nuevas.join("; ")+"." : "")};
+        pinta(); pintaAviso();
+      }catch(e){
+        const copia = {
+          not_granted:"No diste permiso para usar Claude en esta página. Captura la hoja a mano.",
+          rate_limited:"Hay muchas peticiones en este momento. Inténtalo en un minuto.",
+          images_unavailable:"Este visor no acepta imágenes. Captura la hoja a mano.",
+          image_rejected:"No se pudo leer esa imagen. Toma la foto de frente y bien iluminada.",
+          invalid_json:"La lectura salió incompleta. Vuelve a intentarlo o captura a mano."
+        }[e && e.code] || "No se pudo leer la hoja. Captura las cantidades a mano.";
+        conteo.aviso = {tipo:"warn", titulo:"No se completó la lectura.", texto:copia};
+        pintaAviso();
+      }finally{
+        conteo.leyendo=false; btnFoto.disabled=false; btnFoto.textContent="Leer foto de la hoja";
+      }
+    });
+  })();
+
   async function aplicar(){
-    const cambios = arts.map(a=>({a, cont:contadoDe(a), sis:saldoDe(a.id, conteo.almacen)}))
-      .filter(x=> x.cont!==null && Math.abs(x.cont - x.sis) > 0.0001);
-    const contados = arts.filter(a=>contadoDe(a)!==null).length;
-    if(!contados) return toast("Captura al menos un conteo antes de aplicar.", true);
-    if(!cambios.length) return toast("Los "+contados+" conteos coinciden con el sistema, no hay nada que ajustar.");
+    const filas = arts.map(a=>({a, cont:contadoDe(a), sis:saldoDe(a.id, conteo.almacen)}));
+    const capturados = filas.filter(x=>x.cont!==null).length;
+    const palomas = filas.filter(x=>x.cont===OK).length;
+    const cambios = filas.filter(x=> x.cont!==null && x.cont!==OK && Math.abs(x.cont - x.sis) > 0.0001);
+    if(!capturados) return toast("Captura al menos un conteo antes de aplicar.", true);
+    if(!cambios.length) return toast("Nada que ajustar. Los conteos con número coinciden con el sistema.");
     if(!confirm("Aplicar el conteo de "+alm(conteo.almacen).nombre+"?\n\n"+
-      cambios.length+" artículo(s) quedarán ajustados a lo que contaste.\nSe registra un movimiento de ajuste por cada diferencia.")) return;
+      cambios.length+" artículo(s) quedarán ajustados a lo que contaste.\n"+
+      (palomas? palomas+" con palomita se quedan como están, porque no traen cantidad.\n":"")+
+      "\nSe registra un movimiento de ajuste por cada diferencia.")) return;
     for(const x of cambios){
       await put("movimientos", uid("mov-"), {ts:new Date().toISOString(), fecha:conteo.fecha||hoy(),
         tipo:"ajuste", articuloId:x.a.id, almacen:conteo.almacen, cantidad:(x.cont - x.sis), lote:null,
         motivo:"Conteo físico", responsable:conteo.responsable||null,
         nota:"Contado "+qty(x.cont)+" "+x.a.unidad+", sistema "+qty(x.sis)});
     }
-    toast("Conteo aplicado. "+cambios.length+" ajuste(s) registrados.");
-    conteo.valores = {};
+    toast("Conteo aplicado. "+cambios.length+" ajuste(s) registrados"+(palomas? ", "+palomas+" con palomita sin tocar":"")+".");
+    conteo.valores = {}; conteo.aviso = null;
   }
 
   async function exportarPedido(){
     const rows = arts.map(a=>({a, p:pedidoDe(a), cont:contadoDe(a)})).filter(x=>x.p>0);
     if(!rows.length) return toast("No hay nada por pedir en esta sección.");
     const esc = v => '"'+String(v===null||v===undefined?"":v).replace(/"/g,'""')+'"';
-    const lines = [["SECCION","ARTICULO","UNIDAD","MINIMO","INVENTARIO","PEDIDO"].join(",")];
-    rows.forEach(x=> lines.push([alm(conteo.almacen).nombre, x.a.nombre, x.a.unidad,
-      x.a.stockMin, x.cont===null? saldoDe(x.a.id, conteo.almacen) : x.cont, x.p].map(esc).join(",")));
+    const lines = [["SECCION","ARTICULO","MIN","INV","COM","U"].join(",")];
+    rows.forEach(x=> lines.push([alm(conteo.almacen).nombre, x.a.nombre, x.a.stockMin,
+      x.cont===null? saldoDe(x.a.id, conteo.almacen) : x.cont, x.p, x.a.unidad].map(esc).join(",")));
     const csv = "﻿"+lines.join("\n");
     let d=null;
     try{ if(window.claude && claude.use) d = await claude.use("downloads"); }catch(e){ d=null; }
@@ -1607,22 +1740,25 @@ function vConteo(c){
 
   c.appendChild(el("section",{},
     el("div",{class:"section-h"}, el("h2",{text:"Conteo físico y pedido"}),
-      el("span",{class:"hint", text:"Igual que tu hoja: capturas el inventario y sale el pedido"})),
+      el("span",{class:"hint", text:"La columna FINAL de tu hoja. Número, o palomita si hay suficiente"})),
     el("div",{class:"filters"}, chips,
       el("label",{class:"f"}, "Fecha del conteo", iFecha),
-      el("label",{class:"f", style:"min-width:180px"}, "Cuenta", iResp)),
+      el("label",{class:"f", style:"min-width:170px"}, "Cuenta", iResp),
+      btnFoto, fileInput),
+    avisoBox,
     kpiBox,
     el("div",{class:"panel tablewrap", style:"margin-top:12px"}, el("table",{},
       el("thead",{}, el("tr",{},
-        el("th",{text:"Artículo"}), el("th",{text:"U"}), el("th",{class:"num",text:"Mínimo"}),
-        el("th",{class:"num",text:"Sistema"}), el("th",{class:"num",text:"Conteo físico"}),
-        el("th",{class:"num",text:"Diferencia"}), el("th",{class:"num",text:"Pedido"}))), tb)),
+        el("th",{text:"Artículo"}), el("th",{text:"U"}), el("th",{class:"num",text:"MIN"}),
+        el("th",{class:"num",text:"Sistema"}), el("th",{class:"num",text:"FINAL"}),
+        el("th",{class:"num",text:"Diferencia"}), el("th",{class:"num",text:"COM"}))), tb)),
     el("div",{class:"formrow", style:"margin-top:12px"},
       el("button",{class:"btn primary", onclick:aplicar, text:"Aplicar conteo al inventario"}),
       el("button",{class:"btn", onclick:exportarPedido, text:"Exportar pedido"}),
-      el("button",{class:"btn ghost", text:"Limpiar captura", onclick:()=>{ conteo.valores={}; render(); }}),
-      el("span",{class:"small muted", text:"Lo que dejes en blanco no se toca, el pedido se calcula con la existencia del sistema."}))));
-  pinta();
+      el("button",{class:"btn ghost", text:"Limpiar captura",
+        onclick:()=>{ conteo.valores={}; conteo.aviso=null; render(); }}),
+      el("span",{class:"small muted", text:"La palomita no mueve la existencia, solo evita que se pida."}))));
+  pinta(); pintaAviso();
 }
 
 const VIEWS = {tablero:vTablero, recepcion:vRecepcion, produccion:vProduccion, despacho:vDespacho,
