@@ -461,13 +461,27 @@ function costoProm(artId){
   return a && a.costoRef ? Number(a.costoRef) : 0;
 }
 
+/* La palomita de la hoja significa que hay MÁS del mínimo. Se guarda con
+   fecha en el artículo y caduca, para no confiar en una revisión vieja. */
+const DIAS_PALOMITA = 15;
+function palomita(a){
+  if(!a || !a.okFecha) return null;
+  const d = diasA(a.okFecha);
+  return {fecha:a.okFecha, dias: d===null?0:-d};
+}
+function palomitaVigente(a){
+  const p = palomita(a);
+  return !!p && p.dias <= DIAS_PALOMITA;
+}
+
 /* alertas: bajo mínimo, por caducar, vencido, saldo negativo */
 function alertas(){
   const out=[], S=saldos();
   for(const a of state.articulos){
     if(a.activo===false) continue;
     const total = saldoDe(a.id);
-    if(a.stockMin && total < Number(a.stockMin)){
+    /* con palomita vigente hay más del mínimo, aunque el sistema traiga cero */
+    if(a.stockMin && total < Number(a.stockMin) && !palomitaVigente(a)){
       out.push({nivel: total<=0 ? "crit":"warn", clase:"minimo", articuloId:a.id, almacen:a.almacen,
         titulo:a.nombre, detalle:"Existencia "+qty(total)+" "+a.unidad+", mínimo "+qty(a.stockMin)+" "+a.unidad});
     }
@@ -1066,18 +1080,24 @@ function vExistencias(c){
     for(const a of state.articulos){
       if(a.activo===false) continue;
       if(q && !((a.nombre||"").toLowerCase().includes(q) || (a.codigo||"").toLowerCase().includes(q))) continue;
+      const palV = palomitaVigente(a);
       for(const al of almacenes()){
         if(f.almacen && al.id!==f.almacen) continue;
-        const e = S.get(a.id+"|"+al.id);
-        if(!e || Math.abs(e.cantidad)<0.0001) continue;
+        let e = S.get(a.id+"|"+al.id);
+        const conSaldo = e && Math.abs(e.cantidad)>0.0001;
+        /* sin saldo capturado pero con palomita, el artículo sí existe: se sabe
+           que hay más del mínimo, aunque no cuánto */
+        const soloPal = !conSaldo && palV && a.almacen===al.id;
+        if(!conSaldo && !soloPal) continue;
+        if(!e) e = {articuloId:a.id, almacen:al.id, cantidad:0, lotes:new Map()};
         const lotes = Array.from(e.lotes.values()).filter(L=>Math.abs(L.cantidad)>0.0001)
           .sort((x,y)=>String(x.caducidad||"9999").localeCompare(String(y.caducidad||"9999")));
         const prox = lotes.find(L=>L.caducidad);
         const d = prox? diasA(prox.caducidad): null;
-        const bajo = a.stockMin && saldoDe(a.id) < Number(a.stockMin);
+        const bajo = !palV && a.stockMin && saldoDe(a.id) < Number(a.stockMin);
         const alerta = bajo || (d!==null && d<=7) || e.cantidad<0;
         if(f.soloAlerta && !alerta) continue;
-        rows.push({a, al, e, lotes, prox, d, bajo});
+        rows.push({a, al, e, lotes, prox, d, bajo, soloPal});
       }
     }
     rows.sort((x,y)=> (x.al.orden||99)-(y.al.orden||99) || String(x.a.nombre).localeCompare(String(y.a.nombre)));
@@ -1085,13 +1105,17 @@ function vExistencias(c){
       el("div",{class:"empty", text: state.articulos.length? "Ningún artículo cumple el filtro." : "Aún no hay artículos en el catálogo."})))); }
     let valor=0;
     rows.forEach(r=>{
-      const cp = costoProm(r.a.id); valor += r.e.cantidad*cp;
+      const cp = costoProm(r.a.id); if(!r.soloPal) valor += r.e.cantidad*cp;
       tb.appendChild(el("tr",{},
         el("td",{}, el("div",{style:"font-weight:500", text:r.a.nombre}),
           el("div",{class:"small muted mono", text:(r.a.codigo||"")+(r.a.categoria?" · "+r.a.categoria:"")})),
         el("td",{}, el("span",{class:"tag"}, el("span",{class:"zdot", style:"background:var(--z-"+(r.al.zona||"")+")"}), r.al.nombre)),
-        el("td",{class:"num mono", style: r.e.cantidad<0?"color:var(--crit);font-weight:600":""},
-          qty(r.e.cantidad)+" "+r.a.unidad),
+        r.soloPal
+          ? el("td",{class:"num mono small", style:"color:var(--ok)"},
+              "más de "+qty(r.a.stockMin)+" "+r.a.unidad,
+              el("div",{class:"muted", style:"font-size:11px", text:"palomita del "+fecha(r.a.okFecha)}))
+          : el("td",{class:"num mono", style: r.e.cantidad<0?"color:var(--crit);font-weight:600":""},
+              qty(r.e.cantidad)+" "+r.a.unidad),
         el("td",{class:"num mono", text: r.a.stockMin? qty(r.a.stockMin):"—"}),
         el("td",{}, r.lotes.length ? el("details",{class:"lotes"},
             el("summary",{text: r.lotes.length+" lote"+(r.lotes.length>1?"s":"")}),
@@ -1100,7 +1124,7 @@ function vExistencias(c){
         el("td",{}, r.d===null? el("span",{class:"muted small",text:"—"})
           : el("span",{class:"tag "+(r.d<0?"crit":r.d<=7?"warn":"ok"),
               text: r.d<0? "Vencido": r.d<=7? ("En "+r.d+" d"): fecha(r.prox.caducidad)})),
-        el("td",{class:"num mono", text: cp? money(r.e.cantidad*cp): "—"})));
+        el("td",{class:"num mono", text: (cp && !r.soloPal)? money(r.e.cantidad*cp): "—"})));
     });
     totalBox.appendChild(el("div",{class:"kpi"}, el("div",{class:"k",text:"Renglones"}), el("div",{class:"v",text:String(rows.length)})));
     totalBox.appendChild(el("div",{class:"kpi"}, el("div",{class:"k",text:"Valor del inventario"}), el("div",{class:"v",text:money(valor)}),
@@ -1495,7 +1519,7 @@ function vAlmacenes(c){
 /* ---------- Conteo físico y pedido ----------
    Replica la hoja impresa: columnas MIN | FINAL | U.
    En FINAL se acepta un número o una palomita, que significa
-   "hay suficiente, no pedir" sin comprometer una cantidad.
+   "hay más del mínimo" sin decir cuánto exactamente.
    La foto de la hoja se puede leer para llenar la captura.        */
 const conteo = {almacen:"", fecha:hoy(), responsable:"", valores:{}, leyendo:false, aviso:null};
 const OK = "OK";  // la palomita
@@ -1547,7 +1571,7 @@ function vConteo(c){
       el("div",{class:"v",text:contados+" / "+arts.length}),
       el("div",{class:"meter"}, el("i",{class:(pct>=100?"ok":pct>0?"warn":""), style:"width:"+pct+"%"}))));
     kpiBox.appendChild(el("div",{class:"kpi"}, el("div",{class:"k",text:"Con palomita"}),
-      el("div",{class:"v",text:String(palomas)}), el("div",{class:"s",text:"hay, sin cantidad"})));
+      el("div",{class:"v",text:String(palomas)}), el("div",{class:"s",text:"hay más del mínimo"})));
     kpiBox.appendChild(el("div",{class:"kpi"}, el("div",{class:"k",text:"Líneas por pedir"}),
       el("div",{class:"v",text:String(pedir)}), el("div",{class:"s",text:"COM = MIN menos INV"})));
   }
@@ -1566,14 +1590,14 @@ function vConteo(c){
       const inp = el("input",{type:"number", step:"0.001", min:"0", placeholder:"—",
         id:"cnt-"+a.id, value: (v===undefined||v===OK) ? "" : v,
         style:"width:88px;text-align:right;padding:5px 7px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface);font-family:'IBM Plex Mono',monospace"});
-      const btnOK = el("button",{class:"btn sm", "aria-pressed":String(v===OK), title:"Hay suficiente, no pedir",
+      const btnOK = el("button",{class:"btn sm", "aria-pressed":String(v===OK), title:"Hay más del mínimo, no hay que pedir",
         style:"padding:5px 9px;"+(v===OK?"background:var(--ok-soft);border-color:var(--ok);color:var(--ok);font-weight:700":""),
         text:"✓"});
       function refrescaFila(){
         const cont = contadoDe(a);
         const p = pedidoDe(a);
         if(cont===OK){
-          celdaPed.textContent = "no pedir";
+          celdaPed.textContent = "hay de sobra";
           celdaPed.style.cssText = "text-align:right;color:var(--ok);font-size:12px";
         }else if(p>0){
           celdaPed.textContent = qty(p)+" "+a.unidad;
@@ -1586,7 +1610,7 @@ function vConteo(c){
           celdaPed.style.cssText = "text-align:right;color:var(--ok);font-size:12px";
         }
         if(cont===null || cont===OK){
-          celdaDif.textContent = cont===OK ? "sin cantidad" : "—";
+          celdaDif.textContent = cont===OK ? "más del mínimo" : "—";
           celdaDif.style.cssText = "text-align:right;color:var(--ink-3);font-size:12px";
         }else{
           const d = cont - sis;
@@ -1716,7 +1740,7 @@ function vConteo(c){
     if(!cambios.length && !palomas) return toast("Nada que ajustar. Los conteos coinciden con el sistema.");
     if(!confirm("Aplicar el conteo de "+alm(conteo.almacen).nombre+"?\n\n"+
       (cambios.length? cambios.length+" artículo(s) quedarán ajustados a lo que contaste.\n":"")+
-      (palomas? palomas+" con palomita se marcan como revisados, sin tocar su existencia.\n":"")+
+      (palomas? palomas+" con palomita quedan como \"hay más del mínimo\", sin cantidad exacta.\n":"")+
       "\nSe registra un movimiento de ajuste por cada diferencia de cantidad.")) return;
     for(const x of cambios){
       await put("movimientos", uid("mov-"), {ts:new Date().toISOString(), fecha:conteo.fecha||hoy(),
@@ -1758,7 +1782,7 @@ function vConteo(c){
 
   c.appendChild(el("section",{},
     el("div",{class:"section-h"}, el("h2",{text:"Conteo físico y pedido"}),
-      el("span",{class:"hint", text:"La columna FINAL de tu hoja. Número, o palomita si hay suficiente"})),
+      el("span",{class:"hint", text:"La columna FINAL de tu hoja. Número, o palomita si hay más del mínimo"})),
     el("div",{class:"filters"}, chips,
       el("label",{class:"f"}, "Fecha del conteo", iFecha),
       el("label",{class:"f", style:"min-width:170px"}, "Cuenta", iResp),
@@ -1775,7 +1799,7 @@ function vConteo(c){
       el("button",{class:"btn", onclick:exportarPedido, text:"Exportar pedido"}),
       el("button",{class:"btn ghost", text:"Limpiar captura",
         onclick:()=>{ conteo.valores={}; conteo.aviso=null; render(); }}),
-      el("span",{class:"small muted", text:"La palomita no mueve la existencia, solo evita que se pida."}))));
+      el("span",{class:"small muted", text:"La palomita dice que hay más del mínimo, sin cuantificar, así que no se pide."}))));
   pinta(); pintaAviso();
 }
 
@@ -1783,13 +1807,7 @@ function vConteo(c){
    Qué hay que comprar hoy, con COM = MIN - INV sobre la existencia actual.
    Quedan fuera los que traen palomita vigente y los que están al mínimo.  */
 const compras = {almacen:""};
-const DIAS_PALOMITA = 15;   // después de esto la palomita se considera vieja
 
-function palomita(a){
-  if(!a.okFecha) return null;
-  const d = diasA(a.okFecha);
-  return {fecha:a.okFecha, dias: d===null?0:-d};
-}
 function nuncaContado(a){
   if(a.okFecha) return false;
   return !state.movimientos.some(m=>m.articuloId===a.id);
@@ -1871,7 +1889,7 @@ function vCompras(c){
         el("div",{class:"s",text: compras.almacen? alm(compras.almacen).nombre : "todas las secciones"})),
       el("div",{class:"kpi"}, el("div",{class:"k",text:"No se piden"}),
         el("div",{class:"v",text:String(pals.length+sufi.length)}),
-        el("div",{class:"s",text:pals.length+" con palomita, "+sufi.length+" al mínimo"})),
+        el("div",{class:"s",text:pals.length+" con palomita, "+sufi.length+" contados"})),
       el("div",{class:"kpi"}, el("div",{class:"k",text:"Sin contar nunca"}),
         el("div",{class:"v",text:String(sinc.length)}),
         el("div",{class:"s",text:"no se sabe si hace falta"}))),
@@ -1922,7 +1940,7 @@ function vCompras(c){
       el("div",{class:"tablewrap"}, el("table",{}, el("tbody",{}, rows.map(render)))));
   }
   const fuera = el("div",{class:"stack"},
-    bloque("Con palomita, no se piden", "alguien revisó y había suficiente", pals, f=>{
+    bloque("Con palomita, hay más del mínimo", "alguien revisó y sobraba producto", pals, f=>{
       const vieja = f.pal.dias > DIAS_PALOMITA - 5;
       return el("tr",{},
         el("td",{text:f.a.nombre}),

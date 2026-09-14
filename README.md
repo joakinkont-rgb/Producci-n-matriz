@@ -59,13 +59,20 @@ Positivo es lo que hay que comprar, negativo es lo que sobra.
 ### La palomita
 
 En FINAL se acepta un número o una palomita. La palomita significa que hay
-suficiente y no hay que pedir, pero no compromete una cantidad, así que no
-mueve la existencia. Solo los renglones con número generan ajuste.
+**más del mínimo**, sin decir cuánto. Es un dato real, no una ausencia de
+dato: fija un piso para la existencia de ese artículo.
+
+Por eso la palomita no genera ajuste, pero sí cuenta:
+
+- La lista de compras no pide ese artículo.
+- El tablero no lo marca bajo mínimo aunque el sistema lo traiga en cero.
+- En existencias aparece como "más de X", con la fecha de la revisión.
+- No entra en el valor del inventario, porque no hay cantidad que valorizar.
 
 Al aplicar el conteo, la palomita se guarda en el artículo con su fecha
-(`okFecha`). Así la lista de compras sabe que ese artículo ya se revisó y no
-lo pide, aunque su existencia figure en cero. Un conteo posterior con número
-la deja sin efecto.
+(`okFecha`) y vale 15 días. Pasado ese plazo deja de surtir efecto y el
+artículo vuelve a entrar en la lista de compras, para no arrastrar una
+revisión vieja. Un conteo posterior con número la borra.
 
 ### Lista de compras
 
@@ -73,8 +80,8 @@ La pantalla de Compras junta todas las secciones y deja una sola lista con
 lo que falta, agrupada por sección y lista para copiar a un mensaje. Abajo
 explica por qué quedó fuera cada artículo que no entró:
 
-- **Con palomita**: alguien revisó y había suficiente. Se avisa cuando la
-  revisión ya tiene más de 15 días.
+- **Con palomita**: alguien revisó y había más del mínimo. Se avisa cuando
+  la revisión se acerca a los 15 días.
 - **Al mínimo o con sobrante**: el conteo alcanza.
 - **Sin contar nunca**: no hay dato, así que no se puede saber si falta.
 
